@@ -59,8 +59,9 @@ jobs:
             --output-dir firmware "$SKETCH"
           test -s "firmware/$BIN"
           ls -lh "firmware/$BIN"
-          echo "Binary bytes: $(stat -c %s \"firmware/$BIN\")"
-          test "$(stat -c %s \"firmware/$BIN\")" -le 1310720
+          actual_size=$(stat -c %s "firmware/$BIN")
+          echo "Firmware bytes: $actual_size"
+          test "$actual_size" -le 1310720
       - name: Save OTA firmware ZIP
         uses: actions/upload-artifact@v4
         with:
