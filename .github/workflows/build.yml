@@ -33,7 +33,8 @@ jobs:
         run: |
           if test -f RC_Drift_TX_V6_AudioOTA_SINGLE.ino; then
             mkdir -p sketch/RC_Drift_TX_V6_AudioOTA
-            cp RC_Drift_TX_V6_AudioOTA_SINGLE.ino sketch/RC_Drift_TX_V6_AudioOTA/RC_Drift_TX_V6_AudioOTA.ino
+            cp RC_Drift_TX_V6_AudioOTA_SINGLE.ino sketch/RC_Drift_TX_V6_AudioOTA/firmware_impl.h
+            printf '#include "firmware_impl.h"\n' > sketch/RC_Drift_TX_V6_AudioOTA/RC_Drift_TX_V6_AudioOTA.ino
             echo "SKETCH=sketch/RC_Drift_TX_V6_AudioOTA" >> "$GITHUB_ENV"
             echo "BIN=RC_Drift_TX_V6_AudioOTA.ino.bin" >> "$GITHUB_ENV"
           else
