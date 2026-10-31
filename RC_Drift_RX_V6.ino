@@ -169,7 +169,10 @@ volatile float sharedRPM=900,sharedThrottle=0,sharedEngineGain=0;
 volatile float sharedEngineVolume=0.7f,sharedExhaustVolume=0.7f;
 volatile bool eventBov=false,eventPop=false,eventHorn=false,eventIndicator=false;
 uint8_t lastHornCounter=0;bool knownHorn=false;
-uint32_t hornHoldAt=0;bool hornLongDone=false;
+// Original TX V6 only transmits short button releases. RX-only neutral double-tap
+// replaces the unavailable 2-second hold detection without changing TX firmware.
+uint32_t neutralHornFirstAt=0;
+static constexpr uint32_t NEUTRAL_DOUBLE_TAP_MS=650;
 uint32_t lastPopAt=0,lastHornAt=0,delayedPopAt=0;
 
 void requestStart(uint32_t now){if(engineState==ENGINE_OFF){engineState=ENGINE_CRANK;engineSince=now;
@@ -198,22 +201,32 @@ void updateEngine(uint32_t now,bool extraFresh,const AccessoryPacket &a){
 }
 
 void updateHorn(uint32_t now,bool fresh,const AccessoryPacket &a){
- if(!fresh){hornHoldAt=0;hornLongDone=false;return;}
- // TX V6 updated variant uses hornToggle bit7 as Button13 held-state.
- // Lower 7 bits count short releases; older TXs remain compatible for START/horn.
- uint8_t num=a.hornToggle&0x7f;bool held=(a.hornToggle&0x80)!=0;
- if(!knownHorn){lastHornCounter=num;knownHorn=true;}
- else if(num!=lastHornCounter){
-  lastHornCounter=num;
-  if(engineState==ENGINE_OFF)requestStart(now);
-  else if(now-lastHornAt>140){eventHorn=true;lastHornAt=now;}
+ if(!fresh){neutralHornFirstAt=0;return;}
+ // All eight hornToggle bits belong to the existing TX press counter.
+ // The TX does not transmit a long-hold flag.
+ const uint8_t count=a.hornToggle;
+ if(!knownHorn){lastHornCounter=count;knownHorn=true;}
+ else if(count!=lastHornCounter){
+  lastHornCounter=count;
+  if(engineState==ENGINE_OFF){
+   neutralHornFirstAt=0;
+   requestStart(now);
+  }else if(engineState==ENGINE_RUN && a.gear==1){
+   if(neutralHornFirstAt && (uint32_t)(now-neutralHornFirstAt)<=NEUTRAL_DOUBLE_TAP_MS){
+    neutralHornFirstAt=0;
+    requestStop(now);
+    Serial.println("[ENGINE] RX-only N double-tap shutdown");
+   }else neutralHornFirstAt=now;
+  }else{
+   neutralHornFirstAt=0;
+   if(now-lastHornAt>140){eventHorn=true;lastHornAt=now;}
+  }
  }
- if(held){
-  if(!hornHoldAt)hornHoldAt=now;
-  if(!hornLongDone && now-hornHoldAt>=2000 && a.gear==1){hornLongDone=true;requestStop(now);}
- }else{hornHoldAt=0;hornLongDone=false;}
+ if(neutralHornFirstAt && (uint32_t)(now-neutralHornFirstAt)>=NEUTRAL_DOUBLE_TAP_MS){
+  neutralHornFirstAt=0;
+  if(engineState==ENGINE_RUN && a.gear==1){eventHorn=true;lastHornAt=now;}
+ }
 }
-
 // ----- Audio, GPIO25 front and GPIO26 rear, dual 8-bit DAC -----
 // The original BAC Mono WAV loops are converted to 16-bit, 16-kHz PCM in GitHub Actions.
 // I2S stereo DAC can later replace this backend without changing engine logic.
