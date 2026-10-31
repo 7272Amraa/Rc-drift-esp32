@@ -31,7 +31,8 @@ static constexpr int LED_COUNT=17, AUDIO_RATE=16000, ESC_NEUTRAL=1500;
 static constexpr uint8_t RADIO_CHANNEL=6;
 static constexpr uint32_t MAGIC_LEGACY=0xD4A52026UL, MAGIC_EXTRA=0xD6A52026UL;
 static constexpr uint8_t LEGACY_VERSION=5, EXTRA_VERSION=6;
-static constexpr uint32_t FAILSAFE_US=100000, EXTRA_TIMEOUT_MS=350;
+static constexpr uint32_t FAILSAFE_US=150000, EXTRA_TIMEOUT_MS=600;
+// Command neutral after 150ms without a valid TX packet; telemetry remains diagnostic.
 // Driver must understand one-wire, servo-style reversible input 1000-2000us.
 #define EXHAUST_ACTUATOR_ENABLED 0
 #define MOTOR_ENCODER_PPR_X4 40  // Change to your encoder's real quadrature counts/rev.
@@ -66,11 +67,21 @@ ControlPacket rxControl={}; AccessoryPacket rxExtra={};
 volatile bool haveControl=false,haveExtra=false;
 uint32_t lastPackets=0; uint16_t packetsPerSec=0;
 volatile bool sendingTelemetry=false; uint32_t sendStarted=0;
+volatile uint32_t telemetryCallbacks=0,telemetrySendFailures=0,telemetryDeliveryFailures=0;
+uint8_t txMac[6]={0};bool txMacKnown=false,txPeerRegistered=false;
+uint8_t activeTxMac[6]={0};
+uint32_t lastTXPeerAttempt=0;
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5,5,0)
-void onSent(const esp_now_send_info_t*,esp_now_send_status_t){sendingTelemetry=false;}
+void onSent(const esp_now_send_info_t*,esp_now_send_status_t status){
+ telemetryCallbacks++;if(status!=ESP_NOW_SEND_SUCCESS)telemetryDeliveryFailures++;
+ sendingTelemetry=false;
+}
 #else
-void onSent(const uint8_t*,esp_now_send_status_t){sendingTelemetry=false;}
+void onSent(const uint8_t*,esp_now_send_status_t status){
+ telemetryCallbacks++;if(status!=ESP_NOW_SEND_SUCCESS)telemetryDeliveryFailures++;
+ sendingTelemetry=false;
+}
 #endif
 void onReceive(const esp_now_recv_info_t *info,const uint8_t *data,int len){
  if(!info||!info->src_addr||!data)return;
@@ -81,6 +92,7 @@ void onReceive(const esp_now_recv_info_t *info,const uint8_t *data,int len){
      p.gyroPot>1000||p.gyroSetting>1000||p.maxForward>1000||p.maxReverse>1000)return;
   portENTER_CRITICAL(&rxMux);
   rxControl=p;rxAtUs=micros();haveControl=true;packetCount++;
+  memcpy(activeTxMac,info->src_addr,6);txMacKnown=true;
   lastRSSI=info->rx_ctrl?info->rx_ctrl->rssi:-127;
   portEXIT_CRITICAL(&rxMux);
  }else if(len==(int)sizeof(AccessoryPacket)){
@@ -118,8 +130,9 @@ int steerOutput(float x){
 }
 
 // ----- Gyro MPU6500/9250: retains V4.1 receiver yaw compensation -----
-uint8_t imuAddr=0x68;bool gyroOK=false;float gyroBias=0,gyroDps=0;
+uint8_t imuAddr=0x68,gyroWho=0;bool gyroOK=false;float gyroBias=0,gyroDps=0;
 uint32_t gyroLastUs=0;volatile uint8_t activeGyroFilter=25;
+uint32_t gyroReadErrors=0,gyroReadOK=0;
 volatile uint32_t gyroIrq=0;void IRAM_ATTR gyroInterrupt(){gyroIrq++;}
 bool imuWrite(uint8_t r,uint8_t v){Wire.beginTransmission(imuAddr);Wire.write(r);Wire.write(v);return Wire.endTransmission()==0;}
 bool imuRead(uint8_t r,uint8_t &v){Wire.beginTransmission(imuAddr);Wire.write(r);if(Wire.endTransmission(false)!=0)return false;
@@ -127,23 +140,29 @@ bool imuRead(uint8_t r,uint8_t &v){Wire.beginTransmission(imuAddr);Wire.write(r)
 bool readYaw(int16_t &v){Wire.beginTransmission(imuAddr);Wire.write(0x47);if(Wire.endTransmission(false)!=0)return false;
  if(Wire.requestFrom((int)imuAddr,2)!=2)return false;uint8_t hi=Wire.read(),lo=Wire.read();v=(int16_t)((uint16_t(hi)<<8)|lo);return true;}
 bool startGyro(){
- Wire.begin(IMU_SDA,IMU_SCL);Wire.setClock(400000);Wire.setTimeOut(15);
+ Wire.begin(IMU_SDA,IMU_SCL);Wire.setClock(400000);Wire.setTimeOut(20);
  uint8_t who=0;for(uint8_t addr:{uint8_t(0x68),uint8_t(0x69)}){imuAddr=addr;uint8_t t=0;if(imuRead(0x75,t)&&(t==0x70||t==0x71||t==0x73)){who=t;break;}}
+ Serial.printf("[GYRO] I2C addr=0x%02X WHO_AM_I=0x%02X\n",imuAddr,who);
  if(!who)return false;
+ gyroWho=who;
  if(!imuWrite(0x6B,0x80))return false;delay(80);
  if(!imuWrite(0x6B,0x01)||!imuWrite(0x6C,0)||!imuWrite(0x1A,0x01)||!imuWrite(0x19,0)||!imuWrite(0x1B,0x18)||!imuWrite(0x38,1))return false;
  int64_t sum=0;int count=0;for(int i=0;i<500;i++){int16_t raw=0;if(readYaw(raw)){sum+=raw;count++;}delay(2);}
- if(count<350)return false;gyroBias=float(sum)/count;gyroLastUs=micros();
+ if(count<350){Serial.printf("[GYRO] startup sampling FAIL samples=%d/500\n",count);return false;}
+ gyroBias=float(sum)/count;gyroLastUs=micros();
  pinMode(IMU_INT,INPUT);attachInterrupt(digitalPinToInterrupt(IMU_INT),gyroInterrupt,RISING);
  Serial.printf("[GYRO] ready who=0x%02X bias=%.2f\n",who,gyroBias);return true;
 }
 void tickGyro(uint8_t filter){
- if(!gyroOK)return;uint32_t now=micros();if((uint32_t)(now-gyroLastUs)<1000)return;
+ if(!gyroOK)return;uint32_t now=micros();
+ // 400Hz IMU updates are faster than the 50Hz steering servo and free CPU for WiFi.
+ static uint32_t lastAttemptUs=0;
+ if((uint32_t)(now-lastAttemptUs)<2500)return;lastAttemptUs=now;
  int16_t raw=0;if(readYaw(raw)){
   float alpha=constrain(0.06f+float(filter)*0.0040f,0.06f,0.46f);
   float dps=(float(raw)-gyroBias)/16.4f;
-  gyroDps+=alpha*(dps-gyroDps);gyroLastUs=now;
- }
+  gyroDps+=alpha*(dps-gyroDps);gyroLastUs=micros();gyroReadOK++;
+ }else gyroReadErrors++;
 }
 
 // ----- Motor A/B quadrature counter -----
@@ -252,6 +271,7 @@ float loopSample(PlayLoop &s,float rate){
 void audioTask(void*){
  float spool=0,bovEnv=0,popEnv=0,hornEnv=0,clickEnv=0,lowLP=0;
  float popPhase=0,hornPhase=0,crankPhase=0,enginePhase=0;
+ float lowVol=1.0f,highVol=0.0f,onVol=0.0f,offVol=1.0f,pitch=1.0f;
  int64_t next=esp_timer_get_time();
  uint32_t sampleIndex=0;
  for(;;){
@@ -267,10 +287,14 @@ void audioTask(void*){
   spool+=0.00035f*(expectedSpool-spool);
   float growl=0;
 #if HAS_REAL_ENGINE_SAMPLES
-  float high=constrain((rpm-3000)/3500.0f,0.0f,1.0f);
-  float lowVol=cosf(high*1.5707963f),highVol=sinf(high*1.5707963f);
-  float onVol=sinf(throttle*1.5707963f),offVol=cosf(throttle*1.5707963f);
-  float pitch=powf(2.0f,(rpm-1000.0f)*0.2f/1200.0f);
+  // Expensive trig/exponential envelope calculations only at 250Hz,
+  // not 16000 times/sec: greatly reduces core0 contention with WiFi.
+  if((sampleIndex&63U)==0){
+   float high=constrain((rpm-3000)/3500.0f,0.0f,1.0f);
+   lowVol=cosf(high*1.5707963f);highVol=sinf(high*1.5707963f);
+   onVol=sinf(throttle*1.5707963f);offVol=cosf(throttle*1.5707963f);
+   pitch=powf(2.0f,(rpm-1000.0f)*0.2f/1200.0f);
+  }
   growl=(loopSample(loops[0],pitch)*lowVol*onVol+
          loopSample(loops[1],pitch)*highVol*onVol+
          loopSample(loops[2],pitch)*lowVol*offVol+
@@ -313,7 +337,9 @@ void audioTask(void*){
   int64_t now=esp_timer_get_time();
   if(next<now-10000)next=now; // resynchronise after Wi-Fi/scheduler delays
   while((now=esp_timer_get_time())<next){if(next-now>700)delayMicroseconds(50);}
-  if((sampleIndex&511U)==0)taskYIELD();
+  // Allow idle/watchdog and lower-priority WiFi maintenance tasks to run.
+  // DMA/I2S is the preferred hardware upgrade for truly glitch-free sound.
+  if((sampleIndex&1023U)==0)vTaskDelay(1);
  }
 }
 
@@ -401,7 +427,7 @@ void control(uint32_t nowMs){
   else if(c.mode==3){steeringUs=servoCenter;escUs=ESC_NEUTRAL;}
   else{
    float correction=0;
-   if(c.mode==0&&gyroOK&&micros()-gyroLastUs<30000 && (!fresh||a.gyroEnabled)){
+   if(c.mode==0&&gyroOK&&(uint32_t)(micros()-gyroLastUs)<150000 && (!fresh||a.gyroEnabled)){
     float gain=float(c.gyroSetting)/1000.0f*float(c.gyroPot)/1000.0f;
     if(fresh)gain*=float(a.gyroGain)/100.0f*2.0f;
     float rev=fresh&&a.gyroReverse?-1.0f:1.0f;
@@ -435,18 +461,32 @@ void control(uint32_t nowMs){
 }
 void telemetry(uint32_t nowMs){
  if(nowMs-lastTel<100)return;lastTel=nowMs;
- if(sendingTelemetry){if(nowMs-sendStarted>500)sendingTelemetry=false;else return;}
+ if(sendingTelemetry){if(nowMs-sendStarted>250)sendingTelemetry=false;else return;}
+ // Register one unicast peer from the control packets. Unlike broadcast,
+ // unicast provides MAC-layer acknowledgements and retry handling.
+ if(txMacKnown && (!txPeerRegistered || memcmp(txMac,activeTxMac,6)!=0)
+    && nowMs-lastTXPeerAttempt>1000){
+  lastTXPeerAttempt=nowMs;
+  uint8_t target[6];portENTER_CRITICAL(&rxMux);memcpy(target,activeTxMac,6);portEXIT_CRITICAL(&rxMux);
+  if(txPeerRegistered)esp_now_del_peer(txMac);
+  esp_now_peer_info_t peer={};memcpy(peer.peer_addr,target,6);
+  peer.channel=RADIO_CHANNEL;peer.ifidx=WIFI_IF_STA;peer.encrypt=false;
+  esp_err_t result=esp_now_add_peer(&peer);
+  txPeerRegistered=(result==ESP_OK||result==ESP_ERR_ESPNOW_EXIST);
+  if(txPeerRegistered){memcpy(txMac,target,6);Serial.printf("[RADIO] TX unicast peer %02X:%02X:%02X:%02X:%02X:%02X\n",target[0],target[1],target[2],target[3],target[4],target[5]);}
+ }
  uint32_t at,total;int8_t rssi;bool seen;
  portENTER_CRITICAL(&rxMux);at=rxAtUs;total=packetCount;rssi=lastRSSI;seen=haveControl;portEXIT_CRITICAL(&rxMux);
  TelemetryV5 t={};t.magic=MAGIC_LEGACY;t.version=LEGACY_VERSION;t.type=2;
- t.linked=seen && uint32_t(micros()-at)<FAILSAFE_US;t.gyroOK=gyroOK&&uint32_t(micros()-gyroLastUs)<30000;
+ t.linked=seen && uint32_t(micros()-at)<FAILSAFE_US;
+ t.gyroOK=gyroOK && uint32_t(micros()-gyroLastUs)<150000;
  t.rxPps=packetsPerSec;t.batteryMv=batMV;t.rxRssi=rssi;t.armed=armed;
  t.actionAck=actionAck;t.actionError=actionError;
  t.echoTimestampUs=t.linked?rxControl.echoTimestampUs:0;
  t.servoLeftUs=servoLeft;t.servoCenterUs=servoCenter;t.servoRightUs=servoRight;
  sendingTelemetry=true;sendStarted=nowMs;
- esp_err_t e=esp_now_send(BROADCAST_MAC,(uint8_t*)&t,sizeof(t));
- if(e!=ESP_OK)sendingTelemetry=false;
+ esp_err_t e=esp_now_send(txPeerRegistered?txMac:BROADCAST_MAC,(uint8_t*)&t,sizeof(t));
+ if(e!=ESP_OK){sendingTelemetry=false;telemetrySendFailures++;}
 }
 void startRadio(){
  WiFi.mode(WIFI_STA);WiFi.setSleep(false);esp_wifi_set_ps(WIFI_PS_NONE);
@@ -476,9 +516,15 @@ void setup(){
  strip.begin();strip.clear();strip.show();
  analogReadResolution(12);analogSetPinAttenuation(BATTERY_PIN,ADC_11db);
  gyroOK=startGyro();
+ if(!gyroOK){
+  Serial.println("[GYRO] first init failed: retry with 100kHz I2C after power settles");
+  delay(100);Wire.setClock(100000);gyroOK=startGyro();
+ }
+ Serial.printf("[GYRO] init=%d addr=0x%02X WHO=0x%02X\n",gyroOK,imuAddr,gyroWho);
  dacWrite(FRONT_DAC_PIN,128);dacWrite(REAR_DAC_PIN,128);
- xTaskCreatePinnedToCore(audioTask,"rx_audio",6144,nullptr,3,nullptr,0);
+ // Bring up ESP-NOW before starting CPU-intensive audio generation.
  rpmAt=millis();startRadio();
+ xTaskCreatePinnedToCore(audioTask,"rx_audio",6144,nullptr,2,nullptr,0);
  Serial.printf("[AUDIO] bank=%s rate=%d GPIO25/26, LEDs=%d, exhaustActuator=%d\n",
    HAS_REAL_ENGINE_SAMPLES?"BAC original":"synth fallback",AUDIO_RATE,LED_COUNT,EXHAUST_ACTUATOR_ENABLED);
 }
@@ -492,9 +538,15 @@ void loop(){
  if(now-lastStats>=1000){lastStats=now;
   uint32_t total;portENTER_CRITICAL(&rxMux);total=packetCount;portEXIT_CRITICAL(&rxMux);
   packetsPerSec=constrain((int)(total-lastPackets),0,65535);lastPackets=total;
-  Serial.printf("RX LINK=%d pps=%u g=%d RPM=%.0f virtual=%.0f STATE=%u ESC=%d SERVO=%d HOOD=%d BAT=%.2fV AUDIO=%d\n",
-    haveControl&&uint32_t(micros()-rxAtUs)<FAILSAFE_US,packetsPerSec,gyroOK,
-    realMotorRPM,virtualRPM,(unsigned)engineState,escUs,steeringUs,(int)rxExtra.hoodOpen,batMV/1000.0f,HAS_REAL_ENGINE_SAMPLES);
+  Serial.printf("[RX] LINK=%d AGE=%lums PPS=%u RSSI=%ddBm GYRO=%d G_AGE=%lums I2C_ERR=%lu G_READ=%lu TEL_CB=%lu TEL_FAIL=%lu TEL_SEND_ERR=%lu RPM=%.0f ESC=%d HEAP=%u RESET=%d\n",
+    haveControl&&(uint32_t)(micros()-rxAtUs)<FAILSAFE_US,
+    (unsigned long)((uint32_t)(micros()-rxAtUs)/1000U),
+    packetsPerSec,(int)lastRSSI,(int)gyroOK,
+    (unsigned long)((uint32_t)(micros()-gyroLastUs)/1000U),
+    (unsigned long)gyroReadErrors,(unsigned long)gyroReadOK,
+    (unsigned long)telemetryCallbacks,(unsigned long)telemetryDeliveryFailures,
+    (unsigned long)telemetrySendFailures,
+    realMotorRPM,escUs,(unsigned)ESP.getFreeHeap(),(int)esp_reset_reason());
  }
  delay(1);
 }
