@@ -145,8 +145,9 @@ bool startGyro(bool slowBus=false){
  Serial.printf("[GYRO] I2C addr=0x%02X WHO_AM_I=0x%02X\n",imuAddr,who);
  if(!who)return false;
  gyroWho=who;
- if(!imuWrite(0x6B,0x80))return false;delay(80);
- if(!imuWrite(0x6B,0x01)||!imuWrite(0x6C,0)||!imuWrite(0x1A,0x01)||!imuWrite(0x19,0)||!imuWrite(0x1B,0x18)||!imuWrite(0x38,1))return false;
+ if(!imuWrite(0x6B,0x80))return false;delay(100);
+ if(!imuWrite(0x6B,0x01))return false;delay(20);
+ if(!imuWrite(0x6C,0)||!imuWrite(0x1A,0x01)||!imuWrite(0x19,0)||!imuWrite(0x1B,0x18)||!imuWrite(0x38,1))return false;
  int64_t sum=0;int count=0;for(int i=0;i<500;i++){int16_t raw=0;if(readYaw(raw)){sum+=raw;count++;}delay(2);}
  if(count<350){Serial.printf("[GYRO] startup sampling FAIL samples=%d/500\n",count);return false;}
  gyroBias=float(sum)/count;gyroLastUs=micros();
