@@ -139,8 +139,8 @@ bool imuRead(uint8_t r,uint8_t &v){Wire.beginTransmission(imuAddr);Wire.write(r)
  if(Wire.requestFrom((int)imuAddr,1)!=1)return false;v=(uint8_t)Wire.read();return true;}
 bool readYaw(int16_t &v){Wire.beginTransmission(imuAddr);Wire.write(0x47);if(Wire.endTransmission(false)!=0)return false;
  if(Wire.requestFrom((int)imuAddr,2)!=2)return false;uint8_t hi=Wire.read(),lo=Wire.read();v=(int16_t)((uint16_t(hi)<<8)|lo);return true;}
-bool startGyro(){
- Wire.begin(IMU_SDA,IMU_SCL);Wire.setClock(400000);Wire.setTimeOut(20);
+bool startGyro(bool slowBus=false){
+ Wire.begin(IMU_SDA,IMU_SCL);Wire.setClock(slowBus?100000:400000);Wire.setTimeOut(20);
  uint8_t who=0;for(uint8_t addr:{uint8_t(0x68),uint8_t(0x69)}){imuAddr=addr;uint8_t t=0;if(imuRead(0x75,t)&&(t==0x70||t==0x71||t==0x73)){who=t;break;}}
  Serial.printf("[GYRO] I2C addr=0x%02X WHO_AM_I=0x%02X\n",imuAddr,who);
  if(!who)return false;
@@ -518,7 +518,7 @@ void setup(){
  gyroOK=startGyro();
  if(!gyroOK){
   Serial.println("[GYRO] first init failed: retry with 100kHz I2C after power settles");
-  delay(100);Wire.setClock(100000);gyroOK=startGyro();
+  delay(100);gyroOK=startGyro(true);
  }
  Serial.printf("[GYRO] init=%d addr=0x%02X WHO=0x%02X\n",gyroOK,imuAddr,gyroWho);
  dacWrite(FRONT_DAC_PIN,128);dacWrite(REAR_DAC_PIN,128);
