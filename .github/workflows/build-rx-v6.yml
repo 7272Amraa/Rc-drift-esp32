@@ -1,0 +1,68 @@
+name: Build RC Drift RX V6 (4MB, Real WAV)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'RC_Drift_RX_V6.ino'
+      - 'build_engine_samples.py'
+      - '.github/workflows/build-rx-v6.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+jobs:
+  rx:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install board and libraries
+        shell: bash
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.12
+          arduino-cli lib install "ESP32Servo" "Adafruit NeoPixel"
+      - name: Download original BAC Mono engine samples
+        shell: bash
+        run: |
+          mkdir -p sounds
+          base=https://raw.githubusercontent.com/markeasting/engine-audio/master/public/audio
+          for file in BAC_Mono_onlow.wav BAC_Mono_onhigh.wav BAC_Mono_offlow.wav BAC_Mono_offveryhigh.wav; do
+            curl -fL --retry 3 --connect-timeout 15 "$base/$file" -o "sounds/$file"
+            test -s "sounds/$file"
+          done
+      - name: Convert WAVs to embedded PCM audio bank
+        shell: bash
+        run: |
+          mkdir -p RX_V6_Sketch/RC_Drift_RX_V6
+          cp RC_Drift_RX_V6.ino RX_V6_Sketch/RC_Drift_RX_V6/firmware_impl.h
+          printf '#include "firmware_impl.h"\n' > RX_V6_Sketch/RC_Drift_RX_V6/RC_Drift_RX_V6.ino
+          python3 build_engine_samples.py sounds RX_V6_Sketch/RC_Drift_RX_V6/EngineSamples.h
+      - name: Compile RX 4MB OTA-capable firmware
+        shell: bash
+        run: |
+          mkdir -p RX_V6_Firmware
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32:FlashSize=4M,PartitionScheme=min_spiffs \
+            --output-dir RX_V6_Firmware RX_V6_Sketch/RC_Drift_RX_V6
+          test -s RX_V6_Firmware/RC_Drift_RX_V6.ino.bin
+          ls -lh RX_V6_Firmware/RC_Drift_RX_V6.ino.bin
+      - name: Save RX Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: RC-DRIFT-RX-V6-BIN
+          path: RX_V6_Firmware/RC_Drift_RX_V6.ino.bin
+          if-no-files-found: error
+          retention-days: 30
+      - name: Save USB Arduino source (WAV embedded)
+        uses: actions/upload-artifact@v4
+        with:
+          name: RC-DRIFT-RX-V6-USB-SOURCE
+          path: RX_V6_Sketch/RC_Drift_RX_V6/*
+          if-no-files-found: error
+          retention-days: 30
