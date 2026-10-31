@@ -7,6 +7,7 @@ on:
       - 'HelloWorldOTA.ino'
       - 'RC_Drift_TX_V6_AudioOTA_SINGLE.ino'
       - 'RC_Drift_TX_V6_COMPACT.ino'
+      - 'patch_tx_for_rx_v6.py'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -35,6 +36,7 @@ jobs:
           if test -f RC_Drift_TX_V6_COMPACT.ino; then
             mkdir -p sketch/RC_Drift_TX_V6_COMPACT
             cp RC_Drift_TX_V6_COMPACT.ino sketch/RC_Drift_TX_V6_COMPACT/firmware_impl.h
+            python3 patch_tx_for_rx_v6.py sketch/RC_Drift_TX_V6_COMPACT/firmware_impl.h
             printf '#include "firmware_impl.h"\n' > sketch/RC_Drift_TX_V6_COMPACT/RC_Drift_TX_V6_COMPACT.ino
             echo "SKETCH=sketch/RC_Drift_TX_V6_COMPACT" >> "$GITHUB_ENV"
             echo "BIN=RC_Drift_TX_V6_COMPACT.ino.bin" >> "$GITHUB_ENV"
