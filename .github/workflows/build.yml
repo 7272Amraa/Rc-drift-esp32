@@ -50,12 +50,12 @@ jobs:
             echo "SKETCH=sketch/HelloWorldOTA" >> "$GITHUB_ENV"
             echo "BIN=HelloWorldOTA.ino.bin" >> "$GITHUB_ENV"
           fi
-      - name: Compile 8MB OTA firmware
+      - name: Compile 4MB OTA firmware
         shell: bash
         run: |
           mkdir -p firmware
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32da:FlashSize=8M,PartitionScheme=default_8MB \
+            --fqbn esp32:esp32:esp32:FlashSize=4M,PartitionScheme=min_spiffs \
             --output-dir firmware "$SKETCH"
           test -s "firmware/$BIN"
           ls -lh "firmware/$BIN"
