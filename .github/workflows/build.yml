@@ -6,6 +6,7 @@ on:
     paths:
       - 'HelloWorldOTA.ino'
       - 'RC_Drift_TX_V6_AudioOTA_SINGLE.ino'
+      - 'RC_Drift_TX_V6_COMPACT.ino'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -28,10 +29,16 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.3.12
           arduino-cli lib install "Adafruit BusIO" "Adafruit GFX Library" "Adafruit SSD1306"
-      - name: Pick TX V6 (when uploaded), else keep HelloWorld
+      - name: Choose compact TX first for smaller OTA partition
         shell: bash
         run: |
-          if test -f RC_Drift_TX_V6_AudioOTA_SINGLE.ino; then
+          if test -f RC_Drift_TX_V6_COMPACT.ino; then
+            mkdir -p sketch/RC_Drift_TX_V6_COMPACT
+            cp RC_Drift_TX_V6_COMPACT.ino sketch/RC_Drift_TX_V6_COMPACT/firmware_impl.h
+            printf '#include "firmware_impl.h"\n' > sketch/RC_Drift_TX_V6_COMPACT/RC_Drift_TX_V6_COMPACT.ino
+            echo "SKETCH=sketch/RC_Drift_TX_V6_COMPACT" >> "$GITHUB_ENV"
+            echo "BIN=RC_Drift_TX_V6_COMPACT.ino.bin" >> "$GITHUB_ENV"
+          elif test -f RC_Drift_TX_V6_AudioOTA_SINGLE.ino; then
             mkdir -p sketch/RC_Drift_TX_V6_AudioOTA
             cp RC_Drift_TX_V6_AudioOTA_SINGLE.ino sketch/RC_Drift_TX_V6_AudioOTA/firmware_impl.h
             printf '#include "firmware_impl.h"\n' > sketch/RC_Drift_TX_V6_AudioOTA/RC_Drift_TX_V6_AudioOTA.ino
@@ -52,6 +59,8 @@ jobs:
             --output-dir firmware "$SKETCH"
           test -s "firmware/$BIN"
           ls -lh "firmware/$BIN"
+          echo "Binary bytes: $(stat -c %s \"firmware/$BIN\")"
+          test "$(stat -c %s \"firmware/$BIN\")" -le 1310720
       - name: Save OTA firmware ZIP
         uses: actions/upload-artifact@v4
         with:
