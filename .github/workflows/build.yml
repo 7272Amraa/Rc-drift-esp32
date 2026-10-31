@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'HelloWorldOTA.ino'
+      - 'RC_Drift_TX_V6_AudioOTA_SINGLE.ino'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -17,10 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Install Arduino CLI
         uses: arduino/setup-arduino-cli@v2
-
       - name: Install ESP32 core and OLED libraries
         shell: bash
         run: |
@@ -29,26 +28,33 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.3.12
           arduino-cli lib install "Adafruit BusIO" "Adafruit GFX Library" "Adafruit SSD1306"
-
-      - name: Prepare Arduino sketch directory
+      - name: Pick TX V6 (when uploaded), else keep HelloWorld
         shell: bash
         run: |
-          mkdir -p sketch/HelloWorldOTA
-          cp HelloWorldOTA.ino sketch/HelloWorldOTA/HelloWorldOTA.ino
-
+          if test -f RC_Drift_TX_V6_AudioOTA_SINGLE.ino; then
+            mkdir -p sketch/RC_Drift_TX_V6_AudioOTA
+            cp RC_Drift_TX_V6_AudioOTA_SINGLE.ino sketch/RC_Drift_TX_V6_AudioOTA/RC_Drift_TX_V6_AudioOTA.ino
+            echo "SKETCH=sketch/RC_Drift_TX_V6_AudioOTA" >> "$GITHUB_ENV"
+            echo "BIN=RC_Drift_TX_V6_AudioOTA.ino.bin" >> "$GITHUB_ENV"
+          else
+            mkdir -p sketch/HelloWorldOTA
+            cp HelloWorldOTA.ino sketch/HelloWorldOTA/HelloWorldOTA.ino
+            echo "SKETCH=sketch/HelloWorldOTA" >> "$GITHUB_ENV"
+            echo "BIN=HelloWorldOTA.ino.bin" >> "$GITHUB_ENV"
+          fi
       - name: Compile 8MB OTA firmware
         shell: bash
         run: |
+          mkdir -p firmware
           arduino-cli compile \
             --fqbn esp32:esp32:esp32da:FlashSize=8M,PartitionScheme=default_8MB \
-            --output-dir firmware \
-            sketch/HelloWorldOTA
-          test -s firmware/HelloWorldOTA.ino.bin
-
-      - name: Save OTA firmware ZIP artifact
+            --output-dir firmware "$SKETCH"
+          test -s "firmware/$BIN"
+          ls -lh "firmware/$BIN"
+      - name: Save OTA firmware ZIP
         uses: actions/upload-artifact@v4
         with:
           name: ESP32-OTA-BIN
-          path: firmware/HelloWorldOTA.ino.bin
+          path: firmware/*.ino.bin
           if-no-files-found: error
           retention-days: 30
