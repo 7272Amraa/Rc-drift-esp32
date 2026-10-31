@@ -1,0 +1,54 @@
+name: Build ESP32-WROOM-DA OTA BIN
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'HelloWorldOTA.ino'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and OLED libraries
+        shell: bash
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.12
+          arduino-cli lib install "Adafruit BusIO" "Adafruit GFX Library" "Adafruit SSD1306"
+
+      - name: Prepare Arduino sketch directory
+        shell: bash
+        run: |
+          mkdir -p sketch/HelloWorldOTA
+          cp HelloWorldOTA.ino sketch/HelloWorldOTA/HelloWorldOTA.ino
+
+      - name: Compile 8MB OTA firmware
+        shell: bash
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32da:FlashSize=8M,PartitionScheme=default_8MB \
+            --output-dir firmware \
+            sketch/HelloWorldOTA
+          test -s firmware/HelloWorldOTA.ino.bin
+
+      - name: Save OTA firmware ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-OTA-BIN
+          path: firmware/HelloWorldOTA.ino.bin
+          if-no-files-found: error
+          retention-days: 30
