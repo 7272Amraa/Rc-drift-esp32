@@ -1,0 +1,21 @@
+name: Validate RX V6.4 Hardware Timer Audio
+on:
+  push:
+    branches: [rx-v64-timer-validation]
+  workflow_dispatch:
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 core and dependencies
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.12
+          arduino-cli lib install "ESP32Servo" "Adafruit NeoPixel"
+      - name: Compile timer DAC with RX platform dependencies
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32:FlashSize=4M,PartitionScheme=min_spiffs --warnings all RX_V64_TimerCheck
